@@ -7,7 +7,13 @@
 # ** MÉTHODES *****************************************
 #
 # clear ...................	Vide l'affichage et réinitialise tous les éléments
-# add_line ................	Ajoute une ligne
+# parse ...................	Génére la structure d'un script
+# reset_scrolling .........	Réinitialise le défilement à 0
+#
+#
+# ** SIGNAUX ******************************************
+#
+# show (line) .............	Lorsqu'un identifiant a été cliqué
 #
 #............................................................................................................
 
@@ -15,41 +21,45 @@ extends Panel
 
 #............................................................................................................
 
-const _NAMES = ["class", "static func", "func", "var", "const", "signal"]
-const _STATIC = "static"
+const Item = preload("Item.gd")
+const Member = preload("Member.gd")
+const ClassItem = preload("ClassItem.gd")
+const constants = preload("constants.gd")
 
-var ClassItem setget set_read_only # GDScript
-var MemberItem setget set_read_only # GDScript
+const _REGEX_22_KEYWORD_FIX = ["fu", "st", "cl", "va", "co", "si"]
 
-signal id_clicked (line)
+signal show (line)
+
+var menu setget set_menu # Menu.gd
 
 var _container # ScrollContainer
 var _root # ClassItem
 var _empty # CenterContainer
-var _citems # [CLassItem]
-var _mitems # [MemberItem]
+var _citems # [ClassItem]
+var _mitems # [Item]
 var _icons # [{ImageTexture:bool}]
 var _re # RegEx
-var _path # String
-var _file # File
 var _blocks # Array
+var _icon_picker # IconPicker.gd
 
 #............................................................................................................
 
 func clear():
 
-	if _root.get_child_count() == 0: return
+	if _root.is_empty(): return
 
 	_root.clear()
-	for i in _icons: for j in i: i[j] = false
-	_empty.set_hidden(false)
+	for i in _icons: if i != null: for j in i: i[j] = false
+	_update_empty()
 
 #............................................................................................................
 
-func parse(script): # TextEdit
+# Génére la structure d'un script.
+
+func parse(script, v21): # TextEdit, bool
 
 	clear()
-	_blocks.resize(2) # blocs imbriqués [bloc parent (classe ou méthode), indentation (toujours 0 pour b[1])]
+	_blocks.resize(2) # blocs imbriqués [bloc parent (classe/méthode), indentation (0 pour _blocks[1])]
 	var h = script.get_line_count()
 	var n = 2 # taille de _blocks
 	var b = _blocks[0] # bloc parent courant
@@ -58,8 +68,8 @@ func parse(script): # TextEdit
 	var v = 0 # indentation de la ligne courante
 	var c = true # le bloc courant est une classe
 	var s # code complet d'une ligne
-	var t # type de membre
 	var m # membre
+	var r # [String]
 
 	# - hors classe une déclaration n'est jamais indentée sans erreur
 	# - dans une classe une déclaration n'est jamais non-indentée sans erreur
@@ -68,18 +78,19 @@ func parse(script): # TextEdit
 	# - toutes les lignes d'un bloc ont la même indentation mais celle-ci peut avoir n'importe quelle valeur
 	# - un bloc contient un seul type d'indentation, deux blocs peuvent avoir deux types différents
 	# - un bloc parent ne peut pas être vide sans erreur
+	# - une classe n'accepte pas un pass seul
 
 	while i < h:
 
 		s = script.get_line(i)
+		r = _search(s, v21)
 
-		if _re.find(s) < 0: # code non déclarant
+		if r == null: # code non déclarant
 
 			i += 1
 			continue
 
-		t = _re.get_capture(2) # mot-clef
-		v = s.length() - _re.get_capture(1).length() # >= 0
+		v = r[0] # >= 0
 
 		while v <= u and n > 2: # déclaration externe
 
@@ -93,13 +104,13 @@ func parse(script): # TextEdit
 			i += 1
 			continue
 
-		m = _get_item(i, t, _re.get_capture(3))
+		m = _get_item(i, r[1], r[2])
 		b.add_item(m) # référencement en tant que déclaration
 
 		if ClassItem.instance_has(m):
 			c = true
 
-		elif m.is_method():
+		elif m.member.is_method():
 			c = false
 
 		else: # membre
@@ -114,7 +125,7 @@ func parse(script): # TextEdit
 		n += 2
 		i += 1
 
-	_empty.set_hidden(_root.get_child_count() > 0)
+	_update()
 
 #............................................................................................................
 
@@ -125,98 +136,94 @@ func reset_scrolling():
 
 #............................................................................................................
 
-func set_read_only(): return # setter
+func set_menu(): return # setter
 
 #............................................................................................................
 
 func _get_item(l, k, n): # int, String, String : MemberItem | ClassItem
 
-	var t = _NAMES.find(k)
+	var t = constants.NAMES.find(k)
 
-	if t == MemberItem.CLASS:
+	if t == constants.MEMBER_CLASS:
 
 		for i in _citems: # ClassItem
 
-			if i.get_parent() == null:
+			if i.member.line < 0:
 
-				i.line = l
-				i.text = n
-				i.icon = _get_icon(t, k)
-				return i
+				i.member.line = l
+				i.member.label = n
+				return i # les classes conservent leur icône
 
-		var i = ClassItem.new(n)
-		i.line = l
-		i.icon = _get_icon(t, k)
+		var i = ClassItem.new(n, _icon_picker.get_icon(6, 1))
+		i.member.line = l
+		i.member.icon = _get_icon(t)
 		_citems.append(i)
 		return i
 
 	else:
 
-		for i in _mitems: # MemberItem
+		for i in _mitems: # Item
 
-			if i.get_parent() == null:
+			if i.member.line < 0:
 
-				i.type = t
-				i.line = l
-				i.text = n
-				i.icon = _get_icon(t, k)
+				i.member.type = t
+				i.member.line = l
+				i.member.label = n
+				i.member.icon = _get_icon(t)
 				return i
 
-		var i = MemberItem.new(l, t, n)
-		i.icon = _get_icon(t, k)
+		var i = Item.new(Member.new(l, t, n))
+		i.member.icon = _get_icon(t)
 		_mitems.append(i)
 		return i
 
 #............................................................................................................
 
-func _get_icon(t, k): # int, String : ImageTexture
+func _get_icon(type): # int : ImageTexture
 
-	var d = _icons[t]
+	type = clamp(type, constants.MEMBER_FUNC, constants.MEMBER_SIGNAL)
+	var d = _icons[type]
 
-	for i in d: if not d[i]: return i
+	if d == null:
 
-	var i
+		d = {}
+		_icons[type] = d
 
-	if t == MemberItem.STATIC: i = _get_image(_STATIC)
-	else: i = _get_image(k)
+	for i in d:
 
+		if not d[i]:
+
+			d[i] = true
+			return i
+
+	var i = _icon_picker.get_icon(type, 0)
 	d[i] = true
 	return i
 
 #............................................................................................................
 
-func _get_image(n):
-
-	var p = _path % n
-	var t
-	if _file.file_exists(p): t = load(p)
-
-	if t != null:
-
-		t.set_size_override(Vector2(16, 16))
-
-	else:
-
-		var i = Image(1, 1, false,Image.FORMAT_RGB)
-		i.put_pixel(0, 0, Color(1, 0, 1))
-		t = ImageTexture.new()
-		t.create_from_image(i.resized(16, 16))
-
-	return t
+func _on_menu_changed(): _update()
 
 #............................................................................................................
 
-func _on_id_clicked(line): emit_signal("id_clicked", line)
+func _on_mouse_enter():
+
+	var p = get_parent()
+
+	while p != null:
+
+		p.emit_signal(constants.SIGNAL_MOUSE_ENTER)
+		p = p.get_parent()
 
 #............................................................................................................
 
-func _on_item_closed(): _container.queue_sort()
+func _on_closed(): _container.queue_sort()
 
 #............................................................................................................
 
-func _on_mouse_enter(): emit_signal("mouse_enter")
+func _on_show(line): emit_signal(constants.SIGNAL_SHOW, line)
 
-#.. CanvasItem ..............................................................................................
+#............................................................................................................
 
 # Utilisée pour empêcher les barres de défilement de se chevaucher.
 
@@ -241,66 +248,102 @@ func _on_draw():
 
 		h.set_size(Vector2(get_size().width, h.get_size().height))
 
+#............................................................................................................
+
+# Récupére une recherche sous la forme [indentation, mot-clef, identifiant].
+
+func _search(s, v21): # String, bool : [String]
+
+	if not v21:
+
+		if s.length() == 0: return
+		var r = _re.search(s) # Condition ' p_start >= p_text.length() ' is true. returned: __null
+		if r == null: return
+		var a = [s.length() - r.get_string(1).length(), r.get_string(2), r.get_string(3)]
+
+		if a[1].length() == 0:
+			a[1] = constants.NAMES[_REGEX_22_KEYWORD_FIX.find(r.get_string(1).substr(0, 2))]
+
+		return a
+
+	elif _re.find(s) >= 0:
+
+		return [s.length() - _re.get_capture(1).length(), _re.get_capture(2), _re.get_capture(3)]
+
+#............................................................................................................
+
+func _update():
+
+	_root.update(menu)
+	_update_empty()
+
+#............................................................................................................
+
+func _update_empty():
+
+	_empty.get_child(1).set_hidden(not _root.is_white())
+	_empty.get_child(0).set_hidden(not _root.is_empty())
+	_container.queue_sort()
+
 
 #.. Object ..................................................................................................
 
 func free():
 
-	if _root.get_parent() != null: _root.get_parent().remove_child(_root)
-	_root.disconnect("id_clicked", self, "_on_id_clicked")
-	_root.disconnect("closed", self, "_on_item_closed")
-	_root.disconnect("mouse_enter", self, "_on_mouse_enter")
-	_root.free()
-	_root = null
+	_blocks.clear()
 
-	for i in _icons: i.clear()
+	for i in _icons:
+		if i != null:
+			for j in i: VS.free_rid(j)
+
 	_icons.clear()
-	_icons = null
 
+	if _root.get_parent() != null: _root.get_parent().remove_child(_root)
+	_root.free()
+	VS.free_rid(_root)
+
+	for i in _citems:
+		i.free()
+		VS.free_rid(i)
 	_citems.clear()
-	_citems = null
 
+	for i in _mitems:
+		i.free()
+		VS.free_rid(i)
 	_mitems.clear()
-	_mitems = null
 
+	for i in _empty.get_children():
+		_empty.remove_child(i)
+		VS.free_rid(i)
 	if _empty.get_parent() != null: _empty.get_parent().remove_child(_empty)
 	_empty.free()
-	_empty = null
+	VS.free_rid(_empty)
 
-	.disconnect("draw", self, "_on_draw")
+	disconnect("draw", self, "_on_draw")
 	if _container.get_parent() != null: _container.get_parent().remove_child(_container)
 	_container.free()
-	_container = null
+	VS.free_rid(_container)
 
-	_blocks.clear()
-	_blocks.free()
-	_blocks = null
-
-	_file = null
 	_re = null
+	.free()
 
 #............................................................................................................
 
 func _init():
 
-	ClassItem = preload("ClassItem.gd")
-	MemberItem = preload("MemberItem.gd")
-	if ClassItem == null: return OS.alert("ClassItem.gd not found", "Outliner plugin")
-	if MemberItem == null: return OS.alert("MemberItem.gd not found", "Outliner plugin")
+	_icon_picker = preload("IconPicker.gd").new()
+	menu = preload("Menu.gd").new(_icon_picker)
+	menu.connect("changed", self, "_on_menu_changed")
+	set_meta(constants.META_STOP, true)
+	set_custom_minimum_size(Vector2(50, 50))
+	set_v_size_flags(Control.SIZE_EXPAND_FILL) # sinon hauteur minimale
 
 	_citems = []
 	_mitems = []
-	_icons = []
+	_icons = [{}, null, null, {}, null, null]
 
-	_root = ClassItem.new(null)
-	_root.connect("id_clicked", self, "_on_id_clicked")
-	_root.connect("closed", self, "_on_item_closed")
-	_root.connect("mouse_enter", self, "_on_mouse_enter")
-
+	_root = ClassItem.new(null, null)
 	_blocks = [_root, 0]
-	_path = get_script().get_path().get_base_dir() + "/%s.png"
-	_file = File.new()
-	for i in _NAMES: _icons.append({})
 
 	# 0: tout, 1: code non indenté, 2: mot-clef, 3: identifiant
 	_re = RegEx.new()
@@ -311,11 +354,16 @@ func _init():
 	_empty.set_ignore_mouse(true)
 
 	var t = TextureFrame.new()
-	t.set_texture(_get_image("empty"))
+	t.set_texture(_icon_picker.get_icon(6, 0)) # vide
 	t.set_ignore_mouse(true)
 	_empty.add_child(t)
 
-	set_area_as_parent_rect(0)
+	t = TextureFrame.new()
+	t.set_texture(_icon_picker.get_icon(6, 1)) # blanc
+	t.set_ignore_mouse(true)
+	t.set_hidden(true)
+	_empty.add_child(t)
+
 	var m = MarginContainer.new()
 	m.set_area_as_parent_rect(0)
 	m.add_constant_override("margin_top", 8)
@@ -327,7 +375,7 @@ func _init():
 	m.add_child(_root)
 
 	_container = ScrollContainer.new()
-	_container.connect("mouse_enter", self, "_on_mouse_enter")
+	_container.connect(constants.SIGNAL_MOUSE_ENTER, self, "_on_mouse_enter")
 	_container.set_area_as_parent_rect(0)
 	_container.add_child(m)
 	_container.move_child(m, 0)
